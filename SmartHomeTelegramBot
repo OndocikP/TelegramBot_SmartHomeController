@@ -1,0 +1,242 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <UniversalTelegramBot.h>
+#include <Preferences.h>
+#include <map>
+
+// ======= WiFi údaje =======
+const char* ssid = "###WifiName";
+const char* password = "###WifiPassword";
+
+// ======= Telegram Bot údaje =======
+const char* botToken = "###ApiToken";
+
+WiFiClientSecure secured_client;
+UniversalTelegramBot bot(botToken, secured_client);
+
+// === Ukladanie povolených chatov
+Preferences prefs;
+std::map<String, String> allowedChats; // meno -> chat_id (ako String)
+
+// === Nastavenia
+unsigned long lastCheckTime = 0;
+const unsigned long checkInterval = 2000; // 2 sekundy
+const int GARAGE_PIN = 4;  // výstupný pin pre relé/garáž
+const int waitBeforNextComand = 500; // milisekundy
+unsigned long wifiTimeout = 10000;
+
+// === Načítanie povolených chatov z Preferences
+void loadAllowedChats() {
+    prefs.begin("allowedChats", false); // read/write !!!
+    int count = prefs.getInt("count", 0);
+
+    if (count == 0) {
+        // Defaultný chat
+        allowedChats["Admin"] = "###";
+        prefs.putInt("count", 1);
+        prefs.putString("name0", "###ADmin_Chat_ID");
+        prefs.putString("Admin", "###ADmin_Chat_ID");
+        Serial.println("✅ Pridany default kontakt Admin");
+    } else {
+        for (int i = 0; i < count; i++) {
+            String keyName = "name" + String(i);
+            String name = prefs.getString(keyName.c_str(), "");
+            if (name != "") {
+                String chatId = prefs.getString(name.c_str(), "");
+                if (chatId != "") {
+                    allowedChats[name] = chatId;
+                    Serial.println("Nahraty kontakt: " + name + " -> " + chatId);
+                }
+            }
+        }
+    }
+    prefs.end();
+}
+
+
+
+// === Pridanie kontaktu
+void addAllowedChat(String name, String chatId) {
+    allowedChats[name] = chatId;
+    prefs.begin("allowedChats", false);
+
+    int count = prefs.getInt("count", 0);
+    prefs.putString(("name" + String(count)).c_str(), name);
+    prefs.putString(name.c_str(), chatId);
+    prefs.putInt("count", count + 1);
+    prefs.end();
+
+    Serial.println("✅ Pridany kontakt: " + name + " -> " + chatId);
+}
+
+
+// === Odstránenie kontaktu
+void removeAllowedChat(String name) {
+    if (!allowedChats.count(name)) {
+        Serial.println("⚠️ Kontakt neexistuje: " + name);
+        return;
+    }
+
+    allowedChats.erase(name);
+    prefs.begin("allowedChats", false);
+
+    // odstránenie chatId a preusporiadanie name0...nameN
+    int count = prefs.getInt("count", 0);
+    String names[count];
+    int idx = 0;
+
+    for (int i = 0; i < count; i++) {
+        String key = "name" + String(i);
+        String n = prefs.getString(key.c_str(), "");
+        if (n != "" && n != name) {
+            names[idx++] = n;
+        }
+    }
+
+    prefs.clear(); // vymaž všetko
+    prefs.putInt("count", idx);
+    for (int i = 0; i < idx; i++) {
+        prefs.putString(("name" + String(i)).c_str(), names[i].c_str());
+        prefs.putString(names[i].c_str(), allowedChats[names[i]].c_str());
+
+    }
+
+    prefs.end();
+    Serial.println("❌ Odstranený kontakt: " + name);
+}
+
+
+// === Kontrola, či je chat povolený
+bool isChatAllowed(String chatId) {
+    for (auto &entry : allowedChats) {
+        if (entry.second == chatId) return true;
+    }
+    return false;
+}
+
+// === Vypis zoznamu povolenych chatov
+void listAllowedChats(String chat_id) {
+    if (allowedChats.empty()) {
+        bot.sendMessage(chat_id, "📋 Zoznam povolenych chatov je prazdny.", "Markdown");
+        return;
+    }
+
+    String msg = "📋 Povolené chatu:\n";
+    for (auto &entry : allowedChats) {
+        msg += "- " + entry.first + " : " + entry.second + "\n";
+    }
+    bot.sendMessage(chat_id, msg, "Markdown");
+}
+  
+// === Setup
+void setup() {
+    Serial.begin(115200);
+
+    pinMode(GARAGE_PIN, OUTPUT);
+    digitalWrite(GARAGE_PIN, LOW);
+
+    loadAllowedChats();  // tu stačí iba toto
+
+    secured_client.setInsecure();
+    connectWiFi();
+    bot.getUpdates(bot.last_message_received + 1);
+}
+
+
+// === Pripojenie WiFi
+void connectWiFi() {
+    if (WiFi.status() == WL_CONNECTED) return;
+
+    Serial.println("🔌 WiFi nie je pripojene, pripajam sa...");
+    WiFi.begin(ssid, password);
+
+    unsigned long startAttemptTime = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < wifiTimeout) {
+        Serial.print(".");
+        delay(500);
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\n✅ WiFi pripojene!");
+        Serial.print("IP adresa: ");
+        Serial.println(WiFi.localIP());
+        bot.sendMessage("6249845273", "✅ WiFi pripojene!", "Markdown");
+    } else {
+        Serial.println("\n⚠️ Nepodarilo sa pripojit na WiFi! " + WiFi.status());
+    }
+}
+
+
+// === Spracovanie príkazov
+void DoComands(String chat_id, String Comand) {
+    // overenie povoleného chatu
+    if (!isChatAllowed(chat_id)) {
+        bot.sendMessage(chat_id, "⚠️Neopravneni pristup! "+chat_id, "Markdown");
+        return;
+    }
+
+    if (Comand == "/chat") {
+        bot.sendMessage(chat_id, "Pises v chate: " + chat_id, "Markdown");
+    }
+    else if (Comand == "/test") {
+        bot.sendMessage(chat_id, "test");
+    }
+    else if (Comand == "/garage") {
+        digitalWrite(GARAGE_PIN, HIGH);
+        delay(250);
+        digitalWrite(GARAGE_PIN, LOW);
+        bot.sendMessage(chat_id, "🚪garage ");
+        delay(250);
+    }
+    else if (Comand == "/list") {
+        listAllowedChats(chat_id);
+    }
+    else if (Comand.startsWith("/add ")) {
+        // format: /add Meno chatId
+        int firstSpace = Comand.indexOf(' ');
+        int secondSpace = Comand.indexOf(' ', firstSpace + 1);
+        if (secondSpace > firstSpace) {
+            String name = Comand.substring(firstSpace + 1, secondSpace);
+            String newChatId = Comand.substring(secondSpace + 1);
+            addAllowedChat(name, newChatId);
+            bot.sendMessage(chat_id, "✅ Pridany: " + name + " : " + newChatId, "Markdown");
+        } else {
+            bot.sendMessage(chat_id, "⚠️ Nespravny format. Pouzi: /add Meno chatId", "Markdown");
+        }
+    }
+    else if (Comand.startsWith("/remove ")) {
+        // format: /remove Meno
+        String name = Comand.substring(8);
+        removeAllowedChat(name);
+        bot.sendMessage(chat_id, "✅ Odstraneny: " + name, "Markdown");
+    }
+    else {
+        bot.sendMessage(chat_id, "⚠️Neznámy príkaz " + Comand, "Markdown");
+    }
+}
+
+
+// === Loop
+void loop() {
+    connectWiFi();
+
+    if (millis() - lastCheckTime > checkInterval) {
+        int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+
+        while (numNewMessages) {
+            for (int i = 0; i < numNewMessages; i++) {
+                String chat_id = bot.messages[i].chat_id; // String
+                String text = bot.messages[i].text;
+                Serial.print("Sprava zo skupiny " + chat_id + ": ");
+                Serial.println(text);
+
+                DoComands(chat_id, text);
+                delay(waitBeforNextComand);
+            }
+
+            numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+        }
+
+        lastCheckTime = millis();
+    }
+}
